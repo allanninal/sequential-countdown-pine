@@ -1,0 +1,231 @@
+// This source code is subject to the terms of the PolyForm Noncommercial License 1.0.0
+// https://polyformproject.org/licenses/noncommercial/1.0.0/
+// © allanninal
+
+//@version=6
+
+//@description Sequential Countdown: the 9-13 sequential count on the chart. Setup numbers 1-9 (a 9 that is not
+// perfected shows as 9') and countdown numbers 1-13 ("+" for a bar deferred at 12), on closed bars only, so a number
+// never changes once its bar has closed. Alerts on 9 and 13. The exact rules are tests/reference.py.
+indicator("Sequential Countdown", shorttitle = "Seq Countdown", overlay = true)
+
+// ───────────────────────────── Constants ─────────────────────────────
+const int SETUP_LEN = 9        // bars in a complete setup
+const int CD_LEN    = 13       // bars in a complete countdown
+const int RANGE_LEN = 14       // average range of the last 14 bars: the gap between setup and countdown numbers
+
+const string GROUP_DISPLAY = "Display"
+const string GROUP_ALERTS  = "Alerts on"
+
+// ───────────────────────────── Inputs ─────────────────────────────
+bool  showSetup     = input.bool(true, "Show setup numbers 1-8", group = GROUP_DISPLAY, tooltip = "Off: only the 9 that completes a setup is shown.")
+bool  showCountdown = input.bool(true, "Show the countdown 1-13", group = GROUP_DISPLAY, tooltip = "Countdown numbers sit below (buy) or above (sell) the setup numbers. \"+\" marks a bar that met the close rule at 12 but not the bar-8 rule, so it did not count as 13.")
+color buyColor      = input.color(#089981, "Buy setup", group = GROUP_DISPLAY, inline = "setup")
+color sellColor     = input.color(#F23645, "Sell setup", group = GROUP_DISPLAY, inline = "setup")
+color cdBuyColor    = input.color(#2962FF, "Buy countdown", group = GROUP_DISPLAY, inline = "cd")
+color cdSellColor   = input.color(#FF9800, "Sell countdown", group = GROUP_DISPLAY, inline = "cd")
+bool  alert9        = input.bool(true, "A completed 9", group = GROUP_ALERTS, tooltip = "One alert when a buy or sell setup reaches 9, on the bar's close.")
+bool  alert13       = input.bool(true, "A 13", group = GROUP_ALERTS, tooltip = "One alert when a buy or sell countdown reaches 13, on the bar's close.")
+
+// ───────────────────────────── Engine ─────────────────────────────
+//@function The 9-13 setup and countdown, one bar per call (the same steps as tests/reference.py and the MetaTrader
+// engine). Buy setup bar: close < close 4 bars earlier, starting at 1 only after a flip (previous close > the close 4
+// bars before it); 9 in a row completes it. Buy countdown, from setup bar 9: close <= low 2 bars earlier, not
+// necessarily consecutive; 13 needs low <= the close of countdown bar 8, else the bar is deferred. A countdown is
+// cancelled by an opposite setup or a close beyond its setup's level; a new setup of the same side restarts it.
+// Sell mirrors everything.
+//@returns [buy setup count shown (9 on completion), sell setup count shown, setup event (+1 buy 9, -1 sell 9),
+// perfected, buy countdown number of this bar (0 none), sell countdown number, countdown event (+1 buy 13, -1 sell 13),
+// deferred (+1 buy, -1 sell, 0 none)].
+seqStep() =>
+    var int   bCnt  = 0          // setup counts
+    var int   sCnt  = 0
+    var int   bCd   = 0          // countdown counts
+    var int   sCd   = 0
+    var bool  bOn   = false      // countdowns running
+    var bool  sOn   = false
+    var float bC8   = 0.0        // close of countdown bar 8
+    var float sC8   = 0.0
+    var float bLvl  = 0.0        // level of the setup that started the running countdown
+    var float sLvl  = 0.0
+    float hi9 = ta.highest(high, SETUP_LEN)
+    float lo9 = ta.lowest(low, SETUP_LEN)
+    int  evSetup = 0
+    bool perf    = false
+    int  evCd    = 0
+    int  defer   = 0
+    int  bMark   = 0
+    int  sMark   = 0
+    if bar_index >= 5
+        if close < close[4]
+            if bCnt > 0
+                bCnt += 1
+            else if close[1] > close[5]
+                bCnt := 1
+        else
+            bCnt := 0
+        if close > close[4]
+            if sCnt > 0
+                sCnt += 1
+            else if close[1] < close[5]
+                sCnt := 1
+        else
+            sCnt := 0
+        if bCnt == SETUP_LEN
+            evSetup := 1
+            perf    := math.min(low, low[1]) <= math.min(low[3], low[2])
+            bCnt    := 0
+            sOn     := false            // a buy setup cancels the sell countdown
+            sCd     := 0
+            bOn     := true             // and starts (or restarts) the buy countdown
+            bCd     := 0
+            bLvl    := hi9
+        else if sCnt == SETUP_LEN
+            evSetup := -1
+            perf    := math.max(high, high[1]) >= math.max(high[3], high[2])
+            sCnt    := 0
+            bOn     := false
+            bCd     := 0
+            sOn     := true
+            sCd     := 0
+            sLvl    := lo9
+    if bar_index >= 2
+        if bOn and close > bLvl
+            bOn := false                // closed above the setup's highest high: cancelled
+            bCd := 0
+        if sOn and close < sLvl
+            sOn := false
+            sCd := 0
+        if bOn and close <= low[2]
+            if bCd < CD_LEN - 1
+                bCd   += 1
+                bMark := bCd
+                if bCd == 8
+                    bC8 := close
+            else if low <= bC8
+                bCd   := CD_LEN
+                evCd  := 1
+                bOn   := false
+                bMark := CD_LEN
+            else
+                defer := 1
+        if sOn and close >= high[2]
+            if sCd < CD_LEN - 1
+                sCd   += 1
+                sMark := sCd
+                if sCd == 8
+                    sC8 := close
+            else if high >= sC8
+                sCd   := CD_LEN
+                evCd  := -1
+                sOn   := false
+                sMark := CD_LEN
+            else
+                defer := -1
+    int showB = evSetup == 1 ? SETUP_LEN : bCnt
+    int showS = evSetup == -1 ? SETUP_LEN : sCnt
+    if evCd == 1
+        bCd := 0
+    if evCd == -1
+        sCd := 0
+    [showB, showS, evSetup, perf, bMark, sMark, evCd, defer]
+
+// ───────────────────────────── Calculations ─────────────────────────────
+[showB, showS, evSetup, perf, bMark, sMark, evCd, defer] = seqStep()
+
+// Only a closed bar counts: on the live bar nothing is drawn or alerted until it closes.
+bool closed = barstate.isconfirmed
+
+// Countdown numbers sit one average range (x 0.9) beyond the bar, below the setup numbers; the 13 arrow beyond that.
+float avgRange = nz(ta.sma(high - low, RANGE_LEN), high - low)
+float off      = avgRange * 0.9
+float cdBuyY   = low - off
+float cdSellY  = high + off
+
+bool b9  = closed and evSetup == 1
+bool s9  = closed and evSetup == -1
+bool bSt = closed and showSetup and not b9
+bool sSt = closed and showSetup and not s9
+bool bCdOn = closed and showCountdown
+bool sCdOn = closed and showCountdown
+
+// ───────────────────────────── Plots ─────────────────────────────
+// Buy setup numbers below the bar, sell setup numbers above it.
+plotshape(bSt and showB == 1, "Buy setup 1", shape.circle, location.belowbar, color(na), text = "1", textcolor = buyColor, size = size.tiny, display = display.pane)
+plotshape(bSt and showB == 2, "Buy setup 2", shape.circle, location.belowbar, color(na), text = "2", textcolor = buyColor, size = size.tiny, display = display.pane)
+plotshape(bSt and showB == 3, "Buy setup 3", shape.circle, location.belowbar, color(na), text = "3", textcolor = buyColor, size = size.tiny, display = display.pane)
+plotshape(bSt and showB == 4, "Buy setup 4", shape.circle, location.belowbar, color(na), text = "4", textcolor = buyColor, size = size.tiny, display = display.pane)
+plotshape(bSt and showB == 5, "Buy setup 5", shape.circle, location.belowbar, color(na), text = "5", textcolor = buyColor, size = size.tiny, display = display.pane)
+plotshape(bSt and showB == 6, "Buy setup 6", shape.circle, location.belowbar, color(na), text = "6", textcolor = buyColor, size = size.tiny, display = display.pane)
+plotshape(bSt and showB == 7, "Buy setup 7", shape.circle, location.belowbar, color(na), text = "7", textcolor = buyColor, size = size.tiny, display = display.pane)
+plotshape(bSt and showB == 8, "Buy setup 8", shape.circle, location.belowbar, color(na), text = "8", textcolor = buyColor, size = size.tiny, display = display.pane)
+plotshape(b9 and perf, "Buy setup 9, perfected", shape.circle, location.belowbar, color(na), text = "9", textcolor = buyColor, size = size.small, display = display.pane)
+plotshape(b9 and not perf, "Buy setup 9, not perfected", shape.circle, location.belowbar, color(na), text = "9'", textcolor = buyColor, size = size.small, display = display.pane)
+plotshape(sSt and showS == 1, "Sell setup 1", shape.circle, location.abovebar, color(na), text = "1", textcolor = sellColor, size = size.tiny, display = display.pane)
+plotshape(sSt and showS == 2, "Sell setup 2", shape.circle, location.abovebar, color(na), text = "2", textcolor = sellColor, size = size.tiny, display = display.pane)
+plotshape(sSt and showS == 3, "Sell setup 3", shape.circle, location.abovebar, color(na), text = "3", textcolor = sellColor, size = size.tiny, display = display.pane)
+plotshape(sSt and showS == 4, "Sell setup 4", shape.circle, location.abovebar, color(na), text = "4", textcolor = sellColor, size = size.tiny, display = display.pane)
+plotshape(sSt and showS == 5, "Sell setup 5", shape.circle, location.abovebar, color(na), text = "5", textcolor = sellColor, size = size.tiny, display = display.pane)
+plotshape(sSt and showS == 6, "Sell setup 6", shape.circle, location.abovebar, color(na), text = "6", textcolor = sellColor, size = size.tiny, display = display.pane)
+plotshape(sSt and showS == 7, "Sell setup 7", shape.circle, location.abovebar, color(na), text = "7", textcolor = sellColor, size = size.tiny, display = display.pane)
+plotshape(sSt and showS == 8, "Sell setup 8", shape.circle, location.abovebar, color(na), text = "8", textcolor = sellColor, size = size.tiny, display = display.pane)
+plotshape(s9 and perf, "Sell setup 9, perfected", shape.circle, location.abovebar, color(na), text = "9", textcolor = sellColor, size = size.small, display = display.pane)
+plotshape(s9 and not perf, "Sell setup 9, not perfected", shape.circle, location.abovebar, color(na), text = "9'", textcolor = sellColor, size = size.small, display = display.pane)
+
+// Countdown numbers, a step further out.
+plotshape(bCdOn and bMark == 1 ? cdBuyY : na, "Buy countdown 1", shape.circle, location.absolute, color(na), text = "1", textcolor = cdBuyColor, size = size.tiny, display = display.pane)
+plotshape(bCdOn and bMark == 2 ? cdBuyY : na, "Buy countdown 2", shape.circle, location.absolute, color(na), text = "2", textcolor = cdBuyColor, size = size.tiny, display = display.pane)
+plotshape(bCdOn and bMark == 3 ? cdBuyY : na, "Buy countdown 3", shape.circle, location.absolute, color(na), text = "3", textcolor = cdBuyColor, size = size.tiny, display = display.pane)
+plotshape(bCdOn and bMark == 4 ? cdBuyY : na, "Buy countdown 4", shape.circle, location.absolute, color(na), text = "4", textcolor = cdBuyColor, size = size.tiny, display = display.pane)
+plotshape(bCdOn and bMark == 5 ? cdBuyY : na, "Buy countdown 5", shape.circle, location.absolute, color(na), text = "5", textcolor = cdBuyColor, size = size.tiny, display = display.pane)
+plotshape(bCdOn and bMark == 6 ? cdBuyY : na, "Buy countdown 6", shape.circle, location.absolute, color(na), text = "6", textcolor = cdBuyColor, size = size.tiny, display = display.pane)
+plotshape(bCdOn and bMark == 7 ? cdBuyY : na, "Buy countdown 7", shape.circle, location.absolute, color(na), text = "7", textcolor = cdBuyColor, size = size.tiny, display = display.pane)
+plotshape(bCdOn and bMark == 8 ? cdBuyY : na, "Buy countdown 8", shape.circle, location.absolute, color(na), text = "8", textcolor = cdBuyColor, size = size.tiny, display = display.pane)
+plotshape(bCdOn and bMark == 9 ? cdBuyY : na, "Buy countdown 9", shape.circle, location.absolute, color(na), text = "9", textcolor = cdBuyColor, size = size.tiny, display = display.pane)
+plotshape(bCdOn and bMark == 10 ? cdBuyY : na, "Buy countdown 10", shape.circle, location.absolute, color(na), text = "10", textcolor = cdBuyColor, size = size.tiny, display = display.pane)
+plotshape(bCdOn and bMark == 11 ? cdBuyY : na, "Buy countdown 11", shape.circle, location.absolute, color(na), text = "11", textcolor = cdBuyColor, size = size.tiny, display = display.pane)
+plotshape(bCdOn and bMark == 12 ? cdBuyY : na, "Buy countdown 12", shape.circle, location.absolute, color(na), text = "12", textcolor = cdBuyColor, size = size.tiny, display = display.pane)
+plotshape(bCdOn and bMark == 13 ? cdBuyY : na, "Buy countdown 13", shape.circle, location.absolute, color(na), text = "13", textcolor = cdBuyColor, size = size.small, display = display.pane)
+plotshape(bCdOn and defer == 1 ? cdBuyY : na, "Buy countdown deferred", shape.circle, location.absolute, color(na), text = "+", textcolor = cdBuyColor, size = size.tiny, display = display.pane)
+plotshape(sCdOn and sMark == 1 ? cdSellY : na, "Sell countdown 1", shape.circle, location.absolute, color(na), text = "1", textcolor = cdSellColor, size = size.tiny, display = display.pane)
+plotshape(sCdOn and sMark == 2 ? cdSellY : na, "Sell countdown 2", shape.circle, location.absolute, color(na), text = "2", textcolor = cdSellColor, size = size.tiny, display = display.pane)
+plotshape(sCdOn and sMark == 3 ? cdSellY : na, "Sell countdown 3", shape.circle, location.absolute, color(na), text = "3", textcolor = cdSellColor, size = size.tiny, display = display.pane)
+plotshape(sCdOn and sMark == 4 ? cdSellY : na, "Sell countdown 4", shape.circle, location.absolute, color(na), text = "4", textcolor = cdSellColor, size = size.tiny, display = display.pane)
+plotshape(sCdOn and sMark == 5 ? cdSellY : na, "Sell countdown 5", shape.circle, location.absolute, color(na), text = "5", textcolor = cdSellColor, size = size.tiny, display = display.pane)
+plotshape(sCdOn and sMark == 6 ? cdSellY : na, "Sell countdown 6", shape.circle, location.absolute, color(na), text = "6", textcolor = cdSellColor, size = size.tiny, display = display.pane)
+plotshape(sCdOn and sMark == 7 ? cdSellY : na, "Sell countdown 7", shape.circle, location.absolute, color(na), text = "7", textcolor = cdSellColor, size = size.tiny, display = display.pane)
+plotshape(sCdOn and sMark == 8 ? cdSellY : na, "Sell countdown 8", shape.circle, location.absolute, color(na), text = "8", textcolor = cdSellColor, size = size.tiny, display = display.pane)
+plotshape(sCdOn and sMark == 9 ? cdSellY : na, "Sell countdown 9", shape.circle, location.absolute, color(na), text = "9", textcolor = cdSellColor, size = size.tiny, display = display.pane)
+plotshape(sCdOn and sMark == 10 ? cdSellY : na, "Sell countdown 10", shape.circle, location.absolute, color(na), text = "10", textcolor = cdSellColor, size = size.tiny, display = display.pane)
+plotshape(sCdOn and sMark == 11 ? cdSellY : na, "Sell countdown 11", shape.circle, location.absolute, color(na), text = "11", textcolor = cdSellColor, size = size.tiny, display = display.pane)
+plotshape(sCdOn and sMark == 12 ? cdSellY : na, "Sell countdown 12", shape.circle, location.absolute, color(na), text = "12", textcolor = cdSellColor, size = size.tiny, display = display.pane)
+plotshape(sCdOn and sMark == 13 ? cdSellY : na, "Sell countdown 13", shape.circle, location.absolute, color(na), text = "13", textcolor = cdSellColor, size = size.small, display = display.pane)
+plotshape(sCdOn and defer == -1 ? cdSellY : na, "Sell countdown deferred", shape.circle, location.absolute, color(na), text = "+", textcolor = cdSellColor, size = size.tiny, display = display.pane)
+
+// The 13 arrows, beyond the countdown numbers.
+plotshape(closed and evCd == 1 ? low - 2 * off : na, "Buy 13", shape.triangleup, location.absolute, buyColor, size = size.small)
+plotshape(closed and evCd == -1 ? high + 2 * off : na, "Sell 13", shape.triangledown, location.absolute, sellColor, size = size.small)
+
+// The counts, for the Data Window and for other scripts (the same values as the MetaTrader buffers).
+plot(closed ? (evSetup == 1 and perf ? 10 : showB) : na, "Buy setup count (9 = complete, 10 = perfected 9)", display = display.data_window)
+plot(closed ? (evSetup == -1 and perf ? 10 : showS) : na, "Sell setup count (9 = complete, 10 = perfected 9)", display = display.data_window)
+plot(closed ? (defer == 1 ? -1 : bMark) : na, "Buy countdown number (-1 = deferred)", display = display.data_window)
+plot(closed ? (defer == -1 ? -1 : sMark) : na, "Sell countdown number (-1 = deferred)", display = display.data_window)
+
+// ───────────────────────────── Alerts ─────────────────────────────
+// One alert per closed bar, naming the 9 and the 13 it completed. Create it with "Any alert() function call".
+bool fire9  = alert9 and closed and evSetup != 0
+bool fire13 = alert13 and closed and evCd != 0
+if fire9 or fire13
+    string where = " on " + syminfo.ticker + " " + timeframe.period
+    string msg = ""
+    if fire9
+        msg := (evSetup > 0 ? "Buy" : "Sell") + " setup 9" + (perf ? " (perfected)" : "") + where
+    if fire13
+        msg += (msg == "" ? "" : "; ") + (evCd > 0 ? "Buy" : "Sell") + " countdown 13" + where
+    alert(msg, alert.freq_once_per_bar_close)
+
+alertcondition(closed and evSetup == 1, "Buy setup 9", "Buy setup 9 on {{ticker}} {{interval}}")
+alertcondition(closed and evSetup == -1, "Sell setup 9", "Sell setup 9 on {{ticker}} {{interval}}")
+alertcondition(closed and evCd == 1, "Buy countdown 13", "Buy countdown 13 on {{ticker}} {{interval}}")
+alertcondition(closed and evCd == -1, "Sell countdown 13", "Sell countdown 13 on {{ticker}} {{interval}}")
